@@ -17,8 +17,10 @@ export interface ProcessResponse {
   provider: Provider
   transport: string
   export_file_name: string
+  report_file_name: string
   extraction: ExtractionStats
   json_result: Record<string, unknown>
+  report_markdown: string
 }
 
 export interface ChatEntry {

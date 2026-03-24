@@ -7,6 +7,7 @@ from api.app.config import get_settings
 from api.app.models.schemas import ExtractionStats, ProcessResponse, Provider
 from api.app.services.ai import convert_document
 from api.app.services.extraction import prepare_document
+from api.app.services.reporting import generate_technical_report
 
 settings = get_settings()
 app = FastAPI(title="Machine Reader Chat API")
@@ -53,8 +54,9 @@ async def process_file(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Failed to read file: {exc}") from exc
 
-    result, transport = await convert_document(prepared, provider, settings)
+    result, transport, trace = await convert_document(prepared, provider, settings)
     export_file_name = f"{Path(file.filename).stem}.machine-readable.json"
+    report_file_name = f"{Path(file.filename).stem}.pipeline-report.md"
 
     extraction = ExtractionStats(
         file_name=prepared.file_name,
@@ -68,12 +70,23 @@ async def process_file(
         warnings=result.get("warnings", prepared.warnings),
     )
 
+    report_markdown = generate_technical_report(
+        prepared=prepared,
+        extraction=extraction,
+        provider=provider,
+        settings=settings,
+        transport=transport,
+        trace=trace,
+    )
+
     provider_label = "DeepSeek" if provider is Provider.DEEPSEEK else "Gemini 3.0"
     return ProcessResponse(
         message=f"Converted {file.filename} with {provider_label}.",
         provider=provider,
         transport=transport,
         export_file_name=export_file_name,
+        report_file_name=report_file_name,
         extraction=extraction,
         json_result=result,
+        report_markdown=report_markdown,
     )

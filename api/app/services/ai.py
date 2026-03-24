@@ -6,6 +6,7 @@ import httpx
 from api.app.config import Settings
 from api.app.models.schemas import Provider
 from api.app.services.extraction import PreparedDocument
+from api.app.services.reporting import PipelineTrace
 
 
 CONVERSION_SCHEMA: dict[str, Any] = {
@@ -126,12 +127,30 @@ async def convert_document(
     prepared: PreparedDocument,
     provider: Provider,
     settings: Settings,
-) -> tuple[dict[str, Any], str]:
+) -> tuple[dict[str, Any], str, PipelineTrace]:
     text_content = prepared.extracted_text
     combined_warnings = list(prepared.warnings)
+    trace = PipelineTrace(
+        frontend_provider=provider,
+        frontend_label="DeepSeek" if provider is Provider.DEEPSEEK else "Gemini 3.0",
+        local_processing_steps=_build_local_processing_steps(prepared),
+        available_fallbacks=[
+            "Skip OCR if OpenRouter key is missing",
+            "Return local fallback JSON if DeepSeek fails or key is missing",
+            "Return local fallback JSON if OpenRouter JSON call fails or key is missing",
+        ],
+    )
 
     if prepared.ocr_inputs:
         ocr_result = await _run_ocr(prepared, settings)
+        trace.ocr_used = True
+        trace.ocr_transport = "openrouter"
+        trace.ocr_provider_name = "OpenRouter"
+        trace.ocr_model_alias = settings.openrouter_ocr_model
+        trace.ocr_reads_file = True
+        trace.ocr_trigger_reason = _build_ocr_reason(prepared)
+        if settings.openrouter_ocr_model not in trace.openrouter_aliases:
+            trace.openrouter_aliases.append(settings.openrouter_ocr_model)
         combined_warnings.extend(ocr_result.get("warnings", []))
         ocr_text = "\n\n".join(
             page["text"].strip() for page in ocr_result.get("pages", []) if page["text"].strip()
@@ -140,17 +159,53 @@ async def convert_document(
             text_content = "\n\n".join(part for part in [text_content, ocr_text] if part).strip()
         if not text_content:
             combined_warnings.append("OCR did not return readable text.")
+        if ocr_result.get("warnings"):
+            trace.fallback_events.append("OCR warnings were returned by the OpenRouter OCR stage")
 
     text_content = text_content.strip()
 
     if provider is Provider.DEEPSEEK:
         result = await _call_deepseek(prepared, text_content, combined_warnings, settings)
         transport = "deepseek_direct"
+        trace.json_transport = transport
+        trace.json_provider_name = "DeepSeek"
+        trace.json_model_alias = settings.deepseek_model
+        trace.json_reads_file = False
+        trace.json_generated_by = f"{settings.deepseek_model} via DeepSeek direct API"
+        trace.direct_api_calls.append("DeepSeek API: https://api.deepseek.com/chat/completions")
     else:
         result = await _call_openrouter(prepared, text_content, combined_warnings, settings)
         transport = "openrouter"
+        trace.json_transport = transport
+        trace.json_provider_name = "OpenRouter"
+        trace.json_model_alias = settings.openrouter_gemini_model
+        trace.json_reads_file = False
+        trace.json_generated_by = f"{settings.openrouter_gemini_model} via OpenRouter"
+        trace.openrouter_aliases.append(settings.openrouter_gemini_model)
 
-    return _normalize_result(result, prepared, text_content, combined_warnings), transport
+    normalized = _normalize_result(result, prepared, text_content, combined_warnings)
+    if any("DeepSeek request failed" in warning for warning in normalized["warnings"]):
+        trace.fallback_events.append("DeepSeek JSON call failed and local fallback JSON was returned")
+        trace.json_transport = "local_backend_fallback"
+        trace.json_provider_name = "local_backend"
+        trace.json_model_alias = None
+        trace.json_generated_by = "Local backend fallback JSON generator"
+    if any("OpenRouter request failed" in warning for warning in normalized["warnings"]):
+        trace.fallback_events.append("OpenRouter JSON call failed and local fallback JSON was returned")
+        trace.json_transport = "local_backend_fallback"
+        trace.json_provider_name = "local_backend"
+        trace.json_model_alias = None
+        trace.json_generated_by = "Local backend fallback JSON generator"
+    if any("OpenRouter key missing" in warning for warning in normalized["warnings"]):
+        trace.fallback_events.append("OpenRouter was unavailable for at least one stage")
+    if any("DeepSeek key missing" in warning for warning in normalized["warnings"]):
+        trace.fallback_events.append("DeepSeek was unavailable and local fallback JSON was used")
+
+    trace.openrouter_aliases = _dedupe(trace.openrouter_aliases)
+    trace.direct_api_calls = _dedupe(trace.direct_api_calls)
+    trace.fallback_events = _dedupe(trace.fallback_events)
+
+    return normalized, transport, trace
 
 
 async def _run_ocr(prepared: PreparedDocument, settings: Settings) -> dict[str, Any]:
@@ -381,23 +436,24 @@ def _normalize_result(
     warnings: list[str],
 ) -> dict[str, Any]:
     fallback = _build_local_fallback(prepared, text_content, warnings)
+    fallback_document = fallback["document"]
+    fallback_antigravity = fallback["antigravity_export"]
 
-    document = result.get("document") if isinstance(result.get("document"), dict) else {}
-    antigravity_export = (
-        result.get("antigravity_export")
-        if isinstance(result.get("antigravity_export"), dict)
-        else {}
+    document_candidate = result.get("document")
+    document: dict[str, Any] = document_candidate if isinstance(document_candidate, dict) else {}
+
+    antigravity_candidate = result.get("antigravity_export")
+    antigravity_export: dict[str, Any] = (
+        antigravity_candidate if isinstance(antigravity_candidate, dict) else {}
     )
 
     normalized = {
         "document": {
-            "title": document.get("title", fallback["document"]["title"]),
-            "type": str(document.get("type", fallback["document"]["type"])),
-            "language": str(document.get("language", fallback["document"]["language"])),
-            "source_format": str(
-                document.get("source_format", fallback["document"]["source_format"])
-            ),
-            "ocr_applied": bool(document.get("ocr_applied", fallback["document"]["ocr_applied"])),
+            "title": document.get("title", fallback_document["title"]),
+            "type": str(document.get("type", fallback_document["type"])),
+            "language": str(document.get("language", fallback_document["language"])),
+            "source_format": str(document.get("source_format", fallback_document["source_format"])),
+            "ocr_applied": bool(document.get("ocr_applied", fallback_document["ocr_applied"])),
         },
         "summary": str(result.get("summary", fallback["summary"])),
         "entities": _normalize_entities(result.get("entities")),
@@ -407,15 +463,9 @@ def _normalize_result(
         "warnings": _merge_warnings(warnings, result.get("warnings")),
         "antigravity_export": {
             "comparison_ready": bool(
-                antigravity_export.get(
-                    "comparison_ready", fallback["antigravity_export"]["comparison_ready"]
-                )
+                antigravity_export.get("comparison_ready", fallback_antigravity["comparison_ready"])
             ),
-            "format_version": str(
-                antigravity_export.get(
-                    "format_version", fallback["antigravity_export"]["format_version"]
-                )
-            ),
+            "format_version": str(antigravity_export.get("format_version", fallback_antigravity["format_version"])),
         },
     }
 
@@ -501,3 +551,44 @@ def _coerce_message_content(content: Any) -> str:
                 text_parts.append(str(item.get("text", "")))
         return "".join(text_parts)
     raise ValueError("Model response did not contain text content.")
+
+
+def _build_local_processing_steps(prepared: PreparedDocument) -> list[str]:
+    base_steps = [
+        "FastAPI receives the upload and reads the file bytes locally",
+        f"The backend validates extension `{prepared.extension}` and normalizes metadata",
+    ]
+
+    if prepared.extension == ".txt":
+        base_steps.append("The backend decodes the text locally without AI")
+    elif prepared.extension == ".csv":
+        base_steps.append("The backend parses CSV rows locally without AI")
+    elif prepared.extension == ".pdf":
+        base_steps.append("The backend extracts PDF text locally with pypdfium2")
+        base_steps.append("The backend extracts PDF tables locally with pdfplumber")
+        if prepared.used_ocr:
+            base_steps.append("The backend renders PDF pages to images locally before OCR")
+    else:
+        base_steps.append("The backend opens and normalizes the image locally with Pillow")
+        base_steps.append("The backend converts the image to PNG and base64 locally before OCR")
+
+    base_steps.append("The backend normalizes the final JSON payload locally before responding")
+    return base_steps
+
+
+def _build_ocr_reason(prepared: PreparedDocument) -> str:
+    if prepared.extension in {".png", ".jpg", ".jpeg", ".webp"}:
+        return "The uploaded file is an image, so OCR is required to read text"
+    if prepared.extension == ".pdf":
+        return "The PDF had too little extractable local text, so OCR was triggered for scanned or image-heavy content"
+    return "OCR not required"
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value not in seen:
+            unique.append(value)
+            seen.add(value)
+    return unique

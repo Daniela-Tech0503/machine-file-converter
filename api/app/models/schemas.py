@@ -26,5 +26,7 @@ class ProcessResponse(BaseModel):
     provider: Provider
     transport: str
     export_file_name: str
+    report_file_name: str
     extraction: ExtractionStats
     json_result: dict[str, Any]
+    report_markdown: str

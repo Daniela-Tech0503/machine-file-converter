@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Bot, Copy, Download, FileUp, LoaderCircle, Sparkles } from 'lucide-react'
+import { Bot, Copy, Download, FileText, FileUp, LoaderCircle, Sparkles } from 'lucide-react'
 
 import { processDocument } from '@/lib/api'
 import type { ChatEntry, ProcessResponse, Provider } from '@/lib/types'
@@ -49,7 +49,7 @@ function App() {
       }
 
       setMessages((current) => [...current, assistantMessage])
-      handleExport(response)
+      handleExportFiles(response)
       setSelectedFile(null)
     } catch (submissionError) {
       setError(
@@ -67,6 +67,11 @@ function App() {
 
   function handleExport(response: ProcessResponse) {
     handleDirectExport(response)
+  }
+
+  function handleExportFiles(response: ProcessResponse) {
+    handleDirectExport(response)
+    handleReportExport(response)
   }
 
   return (
@@ -89,7 +94,7 @@ function App() {
               Conversion chat
             </CardTitle>
             <CardDescription>
-              Upload one file, choose a model, and get a JSON file downloaded automatically.
+              Upload one file, choose a model, and download both the JSON and a technical markdown report automatically.
             </CardDescription>
           </CardHeader>
 
@@ -105,6 +110,7 @@ function App() {
                       message={message}
                       onCopy={handleCopy}
                       onExport={handleExport}
+                      onExportReport={handleReportExport}
                       canCopy={canUseClipboard}
                     />
                   ))
@@ -175,7 +181,7 @@ function App() {
         <Card>
           <CardHeader>
             <CardTitle>Current result</CardTitle>
-            <CardDescription>Quick stats and direct JSON download for Antigravity comparison.</CardDescription>
+            <CardDescription>Quick stats plus direct download for both JSON and the technical pipeline report.</CardDescription>
           </CardHeader>
           <CardContent>
             {latestResponse ? <ResultPanel response={latestResponse} /> : <SidePlaceholder />}
@@ -206,11 +212,13 @@ function MessageBubble({
   message,
   onCopy,
   onExport,
+  onExportReport,
   canCopy,
 }: {
   message: ChatEntry
   onCopy: (response: ProcessResponse) => Promise<void>
   onExport: (response: ProcessResponse) => void
+  onExportReport: (response: ProcessResponse) => void
   canCopy: boolean
 }) {
   if (message.role === 'user') {
@@ -238,6 +246,7 @@ function MessageBubble({
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="json">JSON</TabsTrigger>
+          <TabsTrigger value="report">Report</TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview" className="space-y-3">
@@ -262,11 +271,23 @@ function MessageBubble({
             </Button>
             <Button variant="secondary" size="sm" onClick={() => onExport(response)}>
               <Download className="h-4 w-4" />
-              Export
+              Download JSON
             </Button>
           </div>
           <pre className="max-h-[420px] overflow-auto rounded-[22px] bg-[#171717] p-4 text-xs leading-6 text-[#f7f3ec]">
             {JSON.stringify(response.json_result, null, 2)}
+          </pre>
+        </TabsContent>
+
+        <TabsContent value="report" className="space-y-3">
+          <div className="flex flex-wrap gap-2">
+            <Button variant="secondary" size="sm" onClick={() => onExportReport(response)}>
+              <FileText className="h-4 w-4" />
+              Download report
+            </Button>
+          </div>
+          <pre className="max-h-[420px] overflow-auto rounded-[22px] bg-[#171717] p-4 text-xs leading-6 text-[#f7f3ec] whitespace-pre-wrap">
+            {response.report_markdown}
           </pre>
         </TabsContent>
       </Tabs>
@@ -292,11 +313,16 @@ function ResultPanel({ response }: { response: ProcessResponse }) {
 
       <div className="rounded-[24px] bg-[var(--soft)] p-4">
         <p className="mb-2 text-xs uppercase tracking-[0.24em] text-[var(--muted-ink)]">Export</p>
-        <p className="text-sm leading-7 text-[var(--ink)]">{response.export_file_name}</p>
-        <div className="mt-3">
+        <p className="text-sm leading-7 text-[var(--ink)]">JSON: {response.export_file_name}</p>
+        <p className="text-sm leading-7 text-[var(--ink)]">Report: {response.report_file_name}</p>
+        <div className="mt-3 flex flex-wrap gap-2">
           <Button variant="secondary" size="sm" onClick={() => handleDirectExport(response)}>
             <Download className="h-4 w-4" />
             Download JSON file
+          </Button>
+          <Button variant="secondary" size="sm" onClick={() => handleReportExport(response)}>
+            <FileText className="h-4 w-4" />
+            Download markdown report
           </Button>
         </div>
       </div>
@@ -311,7 +337,7 @@ function ResultPanel({ response }: { response: ProcessResponse }) {
 function SidePlaceholder() {
   return (
     <div className="rounded-[28px] bg-[var(--soft)] p-5 text-sm leading-7 text-[var(--muted-ink)]">
-      Your latest converted JSON appears here for quick inspection and export.
+      Your latest converted JSON and technical markdown report appear here for quick inspection and download.
     </div>
   )
 }
@@ -324,6 +350,20 @@ function handleDirectExport(response: ProcessResponse) {
   const anchor = document.createElement('a')
   anchor.href = url
   anchor.download = response.export_file_name
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(url)
+}
+
+function handleReportExport(response: ProcessResponse) {
+  const blob = new Blob([response.report_markdown], {
+    type: 'text/markdown;charset=utf-8',
+  })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = response.report_file_name
   document.body.appendChild(anchor)
   anchor.click()
   anchor.remove()
