@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+python-multipart
+httpx
+pydantic-settings
+openai
+pymupdf
+pdfplumber
+pillow
