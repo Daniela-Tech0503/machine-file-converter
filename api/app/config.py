@@ -7,8 +7,8 @@ class Settings(BaseSettings):
     deepseek_api_key: str | None = None
     openrouter_api_key: str | None = None
     deepseek_model: str = "deepseek-chat"
-    openrouter_gemini_model: str = "google/gemini-3-pro-preview"
-    openrouter_ocr_model: str = "google/gemini-3-flash-preview"
+    openrouter_gemini_model: str = "google/gemini-2.5-flash"
+    openrouter_ocr_model: str = "google/gemini-2.5-flash"
     max_upload_mb: int = 10
     max_ocr_pages: int = 4
     allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173"

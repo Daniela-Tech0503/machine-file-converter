@@ -1,7 +1,13 @@
 import { useState } from 'react'
 import { Bot, Copy, Download, FileText, FileUp, LoaderCircle, Sparkles } from 'lucide-react'
 
-import { processDocument } from '@/lib/api'
+import {
+  mergePageResults,
+  processAllPages,
+  processDocument,
+  splitDocument,
+} from '@/lib/api'
+import type { QueueProgress } from '@/lib/api'
 import type { ChatEntry, ProcessResponse, Provider } from '@/lib/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -11,44 +17,70 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
 const ACCEPTED_TYPES = '.pdf,.png,.jpg,.jpeg,.webp,.txt,.csv'
+// File types that benefit from the parallel page-by-page pipeline
+const PARALLEL_EXTENSIONS = new Set(['.pdf', '.png', '.jpg', '.jpeg', '.webp'])
+
+function getExtension(name: string) {
+  return name.slice(name.lastIndexOf('.')).toLowerCase()
+}
 
 function App() {
   const [selectedProvider, setSelectedProvider] = useState<Provider>('deepseek')
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [userInstructions, setUserInstructions] = useState('')
   const [messages, setMessages] = useState<ChatEntry[]>([])
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [progress, setProgress] = useState<QueueProgress | null>(null)
 
   const canUseClipboard = typeof navigator !== 'undefined' && Boolean(navigator.clipboard)
-
-  const latestResponse = [...messages].reverse().find((message) => message.role === 'assistant')?.response
+  const latestResponse = [...messages].reverse().find((m) => m.role === 'assistant')?.response
 
   async function handleSubmit() {
     if (!selectedFile || isSubmitting) return
 
     setError(null)
     setIsSubmitting(true)
+    setProgress(null)
 
     const userMessage: ChatEntry = {
       id: crypto.randomUUID(),
       role: 'user',
       provider: selectedProvider,
       fileName: selectedFile.name,
-      text: `Convert ${selectedFile.name} with ${getProviderLabel(selectedProvider)}.`,
+      text: buildUserMessage(selectedFile.name, selectedProvider, userInstructions),
     }
-
-    setMessages((current) => [...current, userMessage])
+    setMessages((c) => [...c, userMessage])
 
     try {
-      const response = await processDocument(selectedFile, selectedProvider)
+      const ext = getExtension(selectedFile.name)
+      let response: ProcessResponse
+
+      if (PARALLEL_EXTENSIONS.has(ext)) {
+        // --- Parallel FIFO pipeline ---
+        const splitResult = await splitDocument(selectedFile)
+
+        const pages = await processAllPages(
+          selectedFile,
+          selectedProvider,
+          splitResult,
+          3, // concurrency
+          (prog) => setProgress({ ...prog }),
+        )
+
+        response = mergePageResults(pages, selectedFile, selectedProvider, ext)
+      } else {
+        // --- Legacy single-shot for TXT / CSV ---
+        response = await processDocument(selectedFile, selectedProvider, userInstructions.trim())
+      }
+
       const assistantMessage: ChatEntry = {
         id: crypto.randomUUID(),
         role: 'assistant',
         response,
         text: response.message,
       }
-
-      setMessages((current) => [...current, assistantMessage])
+      setMessages((c) => [...c, assistantMessage])
       handleExportFiles(response)
       setSelectedFile(null)
     } catch (submissionError) {
@@ -57,6 +89,7 @@ function App() {
       )
     } finally {
       setIsSubmitting(false)
+      setProgress(null)
     }
   }
 
@@ -83,7 +116,7 @@ function App() {
             Convert files into clean comparison JSON
           </h1>
         </div>
-        <Badge>DeepSeek direct + OpenRouter fallback lane</Badge>
+        <Badge>Parallel page pipeline</Badge>
       </div>
 
       <div className="grid flex-1 gap-6 lg:grid-cols-[1.2fr_0.8fr]">
@@ -94,7 +127,7 @@ function App() {
               Conversion chat
             </CardTitle>
             <CardDescription>
-              Upload one file, choose a model, and download both the JSON and a technical markdown report automatically.
+              Upload one file, choose a model — pages are processed in parallel via a FIFO queue.
             </CardDescription>
           </CardHeader>
 
@@ -117,10 +150,7 @@ function App() {
                 )}
 
                 {isSubmitting ? (
-                  <div className="inline-flex items-center gap-3 rounded-3xl bg-[var(--soft)] px-4 py-3 text-sm text-[var(--muted-ink)]">
-                    <LoaderCircle className="h-4 w-4 animate-spin" />
-                    Processing file, running extraction, OCR if needed, and JSON conversion...
-                  </div>
+                  <ProgressBubble progress={progress} />
                 ) : null}
               </div>
             </ScrollArea>
@@ -139,21 +169,27 @@ function App() {
                     accept={ACCEPTED_TYPES}
                     className="hidden"
                     type="file"
-                    onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
+                    onChange={(e) => setSelectedFile(e.target.files?.[0] ?? null)}
                   />
                 </label>
 
                 <div className="flex flex-col gap-3">
+                  <textarea
+                    className="min-h-24 rounded-[22px] border border-black/10 bg-white px-4 py-3 text-sm text-[var(--ink)] outline-none transition placeholder:text-[var(--muted-ink)] focus:border-black/25"
+                    placeholder="Optional instructions, e.g.: extract invoice fields."
+                    value={userInstructions}
+                    onChange={(e) => setUserInstructions(e.target.value)}
+                  />
                   <Select
                     value={selectedProvider}
-                    onValueChange={(value) => setSelectedProvider(value as Provider)}
+                    onValueChange={(v) => setSelectedProvider(v as Provider)}
                   >
                     <SelectTrigger>
                       <SelectValue placeholder="Choose a model" />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="deepseek">DeepSeek</SelectItem>
-                      <SelectItem value="gemini">Gemini 3.0 via OpenRouter</SelectItem>
+                      <SelectItem value="gemini">Gemini 2.5 Flash via OpenRouter</SelectItem>
                     </SelectContent>
                   </Select>
 
@@ -161,7 +197,7 @@ function App() {
                     {isSubmitting ? (
                       <>
                         <LoaderCircle className="h-4 w-4 animate-spin" />
-                        Converting...
+                        Processing...
                       </>
                     ) : (
                       <>
@@ -181,7 +217,7 @@ function App() {
         <Card>
           <CardHeader>
             <CardTitle>Current result</CardTitle>
-            <CardDescription>Quick stats plus direct download for both JSON and the technical pipeline report.</CardDescription>
+            <CardDescription>Quick stats plus direct download for JSON and the pipeline report.</CardDescription>
           </CardHeader>
           <CardContent>
             {latestResponse ? <ResultPanel response={latestResponse} /> : <SidePlaceholder />}
@@ -192,10 +228,50 @@ function App() {
   )
 }
 
+// ---------------------------------------------------------------------------
+// Progress bubble
+// ---------------------------------------------------------------------------
+
+function ProgressBubble({ progress }: { progress: QueueProgress | null }) {
+  if (!progress) {
+    return (
+      <div className="inline-flex items-center gap-3 rounded-3xl bg-[var(--soft)] px-4 py-3 text-sm text-[var(--muted-ink)]">
+        <LoaderCircle className="h-4 w-4 animate-spin" />
+        Splitting document into pages…
+      </div>
+    )
+  }
+
+  const pct = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0
+
+  return (
+    <div className="rounded-3xl bg-[var(--soft)] px-4 py-3 text-sm text-[var(--muted-ink)]">
+      <div className="mb-2 flex items-center gap-3">
+        <LoaderCircle className="h-4 w-4 animate-spin" />
+        <span>
+          Processing page{' '}
+          {progress.currentPage ? <strong>{progress.currentPage}</strong> : '…'} — {progress.completed}/{progress.total} done
+          {progress.failed > 0 ? `, ${progress.failed} failed` : ''}
+        </span>
+      </div>
+      <div className="h-2 w-full rounded-full bg-black/10">
+        <div
+          className="h-2 rounded-full bg-[var(--ink)] transition-all"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Static components
+// ---------------------------------------------------------------------------
+
 function EmptyState() {
   return (
     <div className="rounded-[28px] border border-dashed border-black/10 bg-white/55 p-6 text-sm leading-7 text-[var(--muted-ink)]">
-      Drop in a file and run a single clean conversion flow.
+      Drop in a file and run a parallel page-by-page conversion.
       <div className="mt-4 flex flex-wrap gap-2">
         <Badge>PDF</Badge>
         <Badge>PNG</Badge>
@@ -216,9 +292,9 @@ function MessageBubble({
   canCopy,
 }: {
   message: ChatEntry
-  onCopy: (response: ProcessResponse) => Promise<void>
-  onExport: (response: ProcessResponse) => void
-  onExportReport: (response: ProcessResponse) => void
+  onCopy: (r: ProcessResponse) => Promise<void>
+  onExport: (r: ProcessResponse) => void
+  onExportReport: (r: ProcessResponse) => void
   canCopy: boolean
 }) {
   if (message.role === 'user') {
@@ -237,7 +313,7 @@ function MessageBubble({
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <Badge>{getProviderLabel(response.provider)}</Badge>
         <Badge>{response.transport === 'deepseek_direct' ? 'Direct API' : 'OpenRouter'}</Badge>
-        {response.extraction.used_ocr ? <Badge>OCR used</Badge> : <Badge>No OCR</Badge>}
+        <Badge>{getOcrBadgeLabel(response)}</Badge>
       </div>
 
       <p className="mb-4 text-sm leading-7 text-[var(--ink)]">{message.text}</p>
@@ -306,7 +382,7 @@ function ResultPanel({ response }: { response: ProcessResponse }) {
 
       <div className="grid gap-3 sm:grid-cols-2">
         <Stat label="Pages" value={response.extraction.pages} />
-        <Stat label="OCR" value={response.extraction.used_ocr ? 'Yes' : 'No'} />
+        <Stat label="OCR" value={getOcrBadgeLabel(response)} />
         <Stat label="Blocks" value={response.extraction.text_blocks} />
         <Stat label="Tables" value={response.extraction.tables_found} />
       </div>
@@ -342,31 +418,33 @@ function SidePlaceholder() {
   )
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 function handleDirectExport(response: ProcessResponse) {
   const blob = new Blob([JSON.stringify(response.json_result, null, 2)], {
     type: 'application/json',
   })
   const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = response.export_file_name
-  document.body.appendChild(anchor)
-  anchor.click()
-  anchor.remove()
+  const a = document.createElement('a')
+  a.href = url
+  a.download = response.export_file_name
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
   URL.revokeObjectURL(url)
 }
 
 function handleReportExport(response: ProcessResponse) {
-  const blob = new Blob([response.report_markdown], {
-    type: 'text/markdown;charset=utf-8',
-  })
+  const blob = new Blob([response.report_markdown], { type: 'text/markdown;charset=utf-8' })
   const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = response.report_file_name
-  document.body.appendChild(anchor)
-  anchor.click()
-  anchor.remove()
+  const a = document.createElement('a')
+  a.href = url
+  a.download = response.report_file_name
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
   URL.revokeObjectURL(url)
 }
 
@@ -380,8 +458,20 @@ function Stat({ label, value }: { label: string; value: number | string }) {
 }
 
 function getProviderLabel(provider: Provider) {
-  return provider === 'deepseek' ? 'DeepSeek' : 'Gemini 3.0'
+  return provider === 'deepseek' ? 'DeepSeek' : 'Gemini 2.5 Flash'
 }
 
+function buildUserMessage(fileName: string, provider: Provider, instructions: string) {
+  const cleaned = instructions.trim()
+  if (!cleaned) return `Convert ${fileName} with ${getProviderLabel(provider)}.`
+  return `Convert ${fileName} with ${getProviderLabel(provider)}. Instructions: ${cleaned}`
+}
+
+function getOcrBadgeLabel(response: ProcessResponse) {
+  if (response.extraction.ocr_succeeded) return 'OCR applied'
+  if (response.extraction.ocr_attempted) return 'OCR failed'
+  if (response.extraction.ocr_requested) return 'OCR required'
+  return 'No OCR'
+}
 
 export default App

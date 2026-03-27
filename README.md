@@ -10,7 +10,7 @@ Minimal chat-style web app for turning files into machine-readable JSON.
 - Converts content into structured JSON for comparison workflows such as Antigravity
 - Lets the user choose:
   - `DeepSeek` via the direct DeepSeek API
-  - `Gemini 3.0` via OpenRouter
+- `Gemini 2.5 Pro` via OpenRouter
 - Shows the result inside a simple chat UI
 - Supports copy and JSON export
 
@@ -24,7 +24,7 @@ Minimal chat-style web app for turning files into machine-readable JSON.
 
 - `DeepSeek` selection -> direct request to DeepSeek using `deepseek-chat`
 - Any non-DeepSeek model -> OpenRouter
-- Current Gemini option -> `google/gemini-3-pro-preview`
+- Current Gemini option -> `google/gemini-2.5-pro`
 - OCR helper for image-heavy content -> `google/gemini-3-flash-preview` through OpenRouter
 
 The OpenRouter aliases were chosen from the current OpenRouter model index during implementation.

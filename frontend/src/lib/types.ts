@@ -9,6 +9,9 @@ export interface ExtractionStats {
   tables_found: number
   characters: number
   used_ocr: boolean
+  ocr_requested: boolean
+  ocr_attempted: boolean
+  ocr_succeeded: boolean
   warnings: string[]
 }
 
@@ -30,4 +33,31 @@ export interface ChatEntry {
   fileName?: string
   response?: ProcessResponse
   text: string
+}
+
+// ---------------------------------------------------------------------------
+// Parallel pipeline types
+// ---------------------------------------------------------------------------
+
+export interface PageInfo {
+  page_number: number
+  has_text: boolean
+  needs_ocr: boolean
+  text_preview: string
+}
+
+export interface SplitResponse {
+  file_name: string
+  extension: string
+  total_pages: number
+  pages: PageInfo[]
+}
+
+export interface PageProcessResponse {
+  page_number: number
+  text: string
+  tables: Record<string, unknown>[]
+  warnings: string[]
+  ocr_applied: boolean
+  transport: string
 }

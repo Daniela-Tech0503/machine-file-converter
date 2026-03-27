@@ -9,16 +9,21 @@ from api.app.services.extraction import PreparedDocument
 class PipelineTrace:
     frontend_provider: Provider
     frontend_label: str
+    user_instructions: str | None = None
     local_processing_steps: list[str] = field(default_factory=list)
     available_fallbacks: list[str] = field(default_factory=list)
     fallback_events: list[str] = field(default_factory=list)
     openrouter_aliases: list[str] = field(default_factory=list)
     direct_api_calls: list[str] = field(default_factory=list)
+    ocr_requested: bool = False
+    ocr_attempted: bool = False
+    ocr_succeeded: bool = False
     ocr_used: bool = False
     ocr_transport: str | None = None
     ocr_provider_name: str | None = None
     ocr_model_alias: str | None = None
     ocr_trigger_reason: str | None = None
+    ocr_failure_reason: str | None = None
     ocr_reads_file: bool = False
     json_transport: str = "local_backend"
     json_provider_name: str = "local_backend"
@@ -26,6 +31,13 @@ class PipelineTrace:
     json_reads_file: bool = False
     json_generated_by: str = "local fallback logic"
     frontend_choice_controls_json_model: bool = True
+
+
+def _config_diagnostics(warnings: list[str]) -> str:
+    diagnostics = [warning for warning in warnings if "configured openrouter" in warning.lower()]
+    if not diagnostics:
+        return "None"
+    return "; ".join(diagnostics)
 
 
 def generate_technical_report(
@@ -36,15 +48,22 @@ def generate_technical_report(
     settings: Settings,
     transport: str,
     trace: PipelineTrace,
+    instructions: str = "",
 ) -> str:
-    file_type_summary = _file_type_summary(prepared.extension, extraction.used_ocr)
+    file_type_summary = _file_type_summary(
+        prepared.extension,
+        trace.ocr_requested,
+        trace.ocr_succeeded,
+    )
     selected_model_line = _selected_model_line(provider, settings)
-    ocr_line = trace.ocr_model_alias if trace.ocr_model_alias else "No OCR model used in this run"
+    ocr_line = trace.ocr_model_alias if trace.ocr_attempted and trace.ocr_model_alias else "No OCR model used in this run"
     openrouter_aliases = ", ".join(trace.openrouter_aliases) if trace.openrouter_aliases else "None"
     direct_calls = ", ".join(trace.direct_api_calls) if trace.direct_api_calls else "None"
     fallback_events = ", ".join(trace.fallback_events) if trace.fallback_events else "None triggered"
     fallback_options = ", ".join(trace.available_fallbacks) if trace.available_fallbacks else "None"
+    config_diagnostics = _config_diagnostics(extraction.warnings)
     local_steps = "\n".join(f"- {step}" for step in trace.local_processing_steps)
+    instructions_summary = instructions.strip() or "None"
 
     report = f"""# Technical Pipeline Report
 
@@ -53,22 +72,29 @@ def generate_technical_report(
 - File: `{prepared.file_name}`
 - File type: `{prepared.extension}`
 - Frontend provider selected by the user: `{trace.frontend_label}`
+- User instructions sent with this submission: `{instructions_summary}`
 - Backend transport used for JSON structuring in this run: `{transport}`
 - Model used to structure content into JSON: `{trace.json_model_alias or 'Local fallback, no external model'}`
 - Model used for OCR in this run: `{ocr_line}`
+- OCR requested for this file: `{_yes_no(trace.ocr_requested)}`
+- OCR attempted in this run: `{_yes_no(trace.ocr_attempted)}`
+- OCR succeeded in this run: `{_yes_no(trace.ocr_succeeded)}`
+- OCR failure reason: `{trace.ocr_failure_reason or 'None'}`
 - OpenRouter aliases used in this run: `{openrouter_aliases}`
 - Direct external API calls used in this run: `{direct_calls}`
 - Fallbacks triggered in this run: `{fallback_events}`
+- Configuration diagnostics for this run: `{config_diagnostics}`
 
 ## Actual Step By Step Pipeline For This Submission
 
 1. The frontend uploads the selected file to `POST /api/process` together with the user-selected provider value (`deepseek` or `gemini`).
-2. FastAPI reads the file bytes locally, validates file size, validates extension, and decides which extraction path to use.
-3. Local backend processing for this file type:
+2. If the user typed instructions in the UI, those instructions are sent with the same request and included in the JSON structuring prompt and this report.
+3. FastAPI reads the file bytes locally, validates file size, validates extension, and decides which extraction path to use.
+4. Local backend processing for this file type:
 {local_steps}
-4. OCR stage for this submission: `{_ocr_step_summary(trace)}`
-5. JSON structuring stage for this submission: `{_json_step_summary(trace)}`
-6. The backend normalizes the final JSON shape, merges warnings, and returns both the JSON payload and this markdown report.
+5. OCR stage for this submission: `{_ocr_step_summary(trace)}`
+6. JSON structuring stage for this submission: `{_json_step_summary(trace)}`
+7. The backend normalizes the final JSON shape, merges warnings, and returns both the JSON payload and this markdown report.
 
 ## Technical Answers To The Required Questions
 
@@ -103,7 +129,7 @@ def generate_technical_report(
 ### Que AI e usada para estruturar a informacao?
 
 - Se o utilizador escolher `DeepSeek`, a estruturacao JSON usa `{settings.deepseek_model}` por chamada direta a `https://api.deepseek.com/chat/completions`.
-- Se o utilizador escolher `Gemini 3.0`, a estruturacao JSON usa o alias OpenRouter `{settings.openrouter_gemini_model}`.
+- Se o utilizador escolher `Gemini`, a estruturacao JSON usa o alias OpenRouter `{settings.openrouter_gemini_model}`.
 
 ### Quem gera o JSON final?
 
@@ -130,7 +156,8 @@ def generate_technical_report(
 
 ### O frontend deixa o utilizador escolher o modelo ou o modelo esta hardcoded?
 
-- O frontend deixa o utilizador escolher entre `DeepSeek` e `Gemini 3.0`.
+- O frontend deixa o utilizador escolher entre `DeepSeek` e `Gemini`.
+- O frontend tambem pode enviar instrucoes livres do utilizador para orientar a estruturacao do JSON.
 - Essa escolha afeta a etapa de estruturacao em JSON.
 - O modelo de OCR nao e escolhido pelo utilizador; esta configurado no backend por variavel de ambiente.
 
@@ -138,7 +165,7 @@ def generate_technical_report(
 
 - Parcialmente.
 - `DeepSeek` na interface corresponde ao alias backend `{settings.deepseek_model}`.
-- `Gemini 3.0` na interface atualmente corresponde ao alias OpenRouter `{settings.openrouter_gemini_model}`.
+- `Gemini` na interface atualmente corresponde ao alias OpenRouter `{settings.openrouter_gemini_model}`.
 - Ou seja, a interface mostra a familia do modelo, mas o alias real pode ser mais especifico e vir de variaveis de ambiente.
 
 ### Há variáveis de ambiente ou aliases de modelos que possam estar a esconder o modelo real?
@@ -196,7 +223,8 @@ def generate_technical_report(
 - Real backend JSON model for this run: `{selected_model_line}`
 - OCR trigger reason: `{trace.ocr_trigger_reason or 'No OCR trigger in this run'}`
 - Was the file text read locally first: `{_yes_no(_file_read_locally(prepared))}`
-- Was content sent to a model for OCR: `{_yes_no(trace.ocr_used)}`
+- Was content sent to a model for OCR: `{_yes_no(trace.ocr_attempted)}`
+- Did OCR return readable content that was applied: `{_yes_no(trace.ocr_succeeded)}`
 - Was JSON generated by an external AI model: `{_yes_no(trace.json_model_alias is not None)}`
 
 ## Warning Signals
@@ -214,19 +242,28 @@ def _selected_model_line(provider: Provider, settings: Settings) -> str:
     return settings.openrouter_gemini_model
 
 
-def _file_type_summary(extension: str, used_ocr: bool) -> str:
+def _file_type_summary(extension: str, ocr_requested: bool, ocr_succeeded: bool) -> str:
     if extension == ".txt":
         return "TXT decoded locally, then structured into JSON by the selected JSON model."
     if extension == ".csv":
         return "CSV parsed locally, then structured into JSON by the selected JSON model."
-    if extension == ".pdf" and not used_ocr:
+    if extension == ".pdf" and not ocr_requested:
         return "PDF text and tables extracted locally, then structured into JSON by the selected JSON model."
-    if extension == ".pdf" and used_ocr:
+    if extension == ".pdf" and ocr_succeeded:
         return "PDF first inspected locally, then OCR was added for image-heavy or scanned pages, then JSON structuring ran."
-    return "Image normalized locally, OCR ran through OpenRouter, then JSON structuring ran."
+    if extension == ".pdf":
+        return "PDF first inspected locally, OCR was attempted for scanned or image-heavy pages, but OCR did not return usable text for this run."
+    if ocr_succeeded:
+        return "Image normalized locally, OCR ran through OpenRouter, then JSON structuring ran."
+    return "Image normalized locally, OCR was attempted through OpenRouter, but OCR did not return usable text for this run."
 
 
 def _ocr_step_summary(trace: PipelineTrace) -> str:
+    if trace.ocr_attempted and not trace.ocr_succeeded:
+        return (
+            f"OCR was attempted with provider `{trace.ocr_provider_name}` and alias `{trace.ocr_model_alias}` "
+            f"via `{trace.ocr_transport}`, but it failed. Reason: `{trace.ocr_failure_reason or 'Unknown OCR failure'}`."
+        )
     if not trace.ocr_used:
         return "No OCR stage was needed."
     return (

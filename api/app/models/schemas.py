@@ -18,6 +18,9 @@ class ExtractionStats(BaseModel):
     tables_found: int = 0
     characters: int = 0
     used_ocr: bool = False
+    ocr_requested: bool = False
+    ocr_attempted: bool = False
+    ocr_succeeded: bool = False
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -30,3 +33,28 @@ class ProcessResponse(BaseModel):
     extraction: ExtractionStats
     json_result: dict[str, Any]
     report_markdown: str
+
+
+# --- Parallel page pipeline schemas ---
+
+class PageInfo(BaseModel):
+    page_number: int
+    has_text: bool
+    needs_ocr: bool
+    text_preview: str = ""
+
+
+class SplitResponse(BaseModel):
+    file_name: str
+    extension: str
+    total_pages: int
+    pages: list[PageInfo]
+
+
+class PageProcessResponse(BaseModel):
+    page_number: int
+    text: str
+    tables: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    ocr_applied: bool = False
+    transport: str = "local"
